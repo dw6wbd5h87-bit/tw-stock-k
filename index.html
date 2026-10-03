@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台股族群領頭羊 K 線</title>
+<style>
+body{font-family:system-ui,"Noto Sans TC",sans-serif;margin:0;padding:20px;background:#f6f7f9;color:#222}
+h1{font-size:22px;margin:0 0 12px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+input{padding:8px 10px;font-size:16px;border:1px solid #bbb;border-radius:6px;width:240px}
+button,.tag{padding:6px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer;font-size:14px}
+.tag.on{background:#222;color:#fff;border-color:#222}
+#tags{display:flex;gap:6px;flex-wrap:wrap}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:12px;margin-top:10px}
+.card{background:#fff;border-radius:8px;padding:10px;border:1px solid #e3e3e3}
+.card.pin{border:2px solid #222}
+.card h3{font-size:15px;margin:0 0 6px}
+.role{font-size:12px;background:#eee;border-radius:4px;padding:2px 6px;margin-left:6px;font-weight:400}
+svg{width:100%;height:auto;display:block}
+.msg{color:#a33;font-size:13px;padding:30px 0;text-align:center}
+.note{font-size:12px;color:#666;margin-top:8px}
+#more{margin:14px 0;display:none}
+</style>
+</head>
+<body>
+<h1>台股族群領頭羊 K 線</h1>
+<div class="bar">
+  <input id="q" placeholder="名單載入中，請稍候…" list="dl" disabled>
+  <datalist id="dl"></datalist>
+  <button id="go" disabled>查詢</button>
+</div>
+<div id="tags"></div>
+<div id="src" class="note">載入全市場股票清單中…</div>
+<div id="status" class="note"></div>
+<div id="grid"></div>
+<button id="more">載入更多</button>
+<p class="note">全市場名單來自證交所／櫃買中心公開資料。「產業」族群依官方產業別分類，並以市值（收盤價 × 股數）由大到小排序，視為領頭羊順序；「題材」族群為人工排列，可編輯下方 THEMES。不構成投資建議。</p>
+
+<script>
+const THEMES = {
+  "題材：晶圓代工":["2330","2303","5347","6770"],
+  "題材：IC設計":["2454","2379","3034","4966","3443","3035","6533"],
+  "題材：封測":["3711","6239","2449","8150"],
+  "題材：AI伺服器":["2317","2382","3231","6669","2356","2376","3706"],
+  "題材：散熱電源":["2308","3017","2301","2421","3324","6230"],
+  "題材：PCB載板":["4958","3037","2383","8046","2368","3044"],
+  "題材：被動元件":["2327","2492","2456","6173"],
+  "題材：光學面板":["3008","3406","2409","3481"],
+  "題材：電信網通":["2412","3045","4904","2345","6285"],
+  "題材：金控":["2881","2882","2891","2886","2884","2885","2880","2883","2887","2890","2892","5880"],
+  "題材：航運":["2603","2609","2615"],
+  "題材：航空":["2618","2610"],
+  "題材：重電綠能":["1519","1503","1513","1514"],
+  "題材：電腦品牌":["2357","2353","2376","2377"]
+};
+const IND_NAME = {"01":"水泥工業","02":"食品工業","03":"塑膠工業","04":"紡織纖維","05":"電機機械","06":"電器電纜","08":"玻璃陶瓷","09":"造紙工業","10":"鋼鐵工業","11":"橡膠工業","12":"汽車工業","14":"建材營造","15":"航運業","16":"觀光餐旅","17":"金融保險","18":"貿易百貨","20":"其他","21":"化學工業","22":"生技醫療","23":"油電燃氣","24":"半導體業","25":"電腦及週邊設備","26":"光電業","27":"通信網路業","28":"電子零組件","29":"電子通路業","30":"資訊服務業","31":"其他電子業","35":"綠能環保","36":"數位雲端","37":"運動休閒","38":"居家生活"};
+let SRC = "";
+// 備援：openapi 網域被擋時，改用已確認可用的 www.twse.com.tw，逐產業抓上市股票與收盤行情
+async function loadListedFallback(){
+  const key="tw_listed_v2", today=new Date().toISOString().slice(0,10);
+  try{ const c=JSON.parse(localStorage.getItem(key)||"null");
+    if(c&&c.day===today&&c.rows.length>500&&c.shares&&Object.keys(c.shares).length>500){ c.rows.forEach(r=>STOCKS[r[0]]={name:r[1],ind:r[2],mkt:"L",cap:0,price:r[3],turn:r[4],shares:c.shares[r[0]]||0}); SRC+="；上市分類：使用今日快取（依市值排序）"; return; } }catch(e){}
+  const fmt=d=>d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate());
+  const fetchInd=async(dt,code)=>{
+    const j=await getJson(`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=${dt}&type=${code}&response=json`);
+    const t=(j.tables||[]).find(t=>t.fields&&t.fields.includes("證券代號"));
+    if(!t) return [];
+    const f=n=>t.fields.indexOf(n);
+    return (t.data||[]).filter(r=>/^\d{4}$/.test(r[f("證券代號")])).map(r=>[r[f("證券代號")],String(r[f("證券名稱")]).trim(),code,num(r[f("收盤價")])||0,num(r[f("成交金額")])||0]);
+  };
+  let dt=null,rows=[];
+  for(let i=0;i<7&&!dt;i++){ const d=new Date(); d.setDate(d.getDate()-i); const s=fmt(d);
+    try{ const r=await fetchInd(s,"24"); if(r.length){ dt=s; rows.push(...r); } }catch(e){} await sleep(300); }
+  if(!dt){ SRC+="；上市分類備援也失敗（抓不到最近交易日資料）"; return; }
+  const codes=Object.keys(IND_NAME).filter(c=>c!=="24"); let i=0;
+  for(const code of codes){ $("src").textContent=`改用備援來源載入上市產業分類… ${++i}/${codes.length}`;
+    try{ rows.push(...await fetchInd(dt,code)); }catch(e){} await sleep(300); }
+  const shares={};
+  try{
+    $("src").textContent="載入各公司發行股數（用來計算市值）…";
+    const j=await getJson(`https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS?date=${dt}&selectType=ALLBUT0999&response=json`);
+    const t=j.fields?{fields:j.fields,data:j.data}:(j.tables||[]).find(t=>t.fields&&t.fields.includes("發行股數"));
+    if(t){ const ic=t.fields.indexOf("證券代號"), is=t.fields.indexOf("發行股數");
+      (t.data||[]).forEach(r=>{ const v=num(r[is]); if(v>0) shares[String(r[ic]).trim()]=v; }); }
+  }catch(e){ SRC+="；發行股數載入失敗："+(e.message||e); }
+  rows.forEach(r=>STOCKS[r[0]]={name:r[1],ind:r[2],mkt:"L",cap:0,price:r[3],turn:r[4],shares:shares[r[0]]||0});
+  const ns=Object.keys(shares).length;
+  if(ns>500){ try{ localStorage.setItem(key,JSON.stringify({day:today,rows,shares})); }catch(e){} }
+  SRC+=`；上市分類備援載入 ${rows.length} 檔（資料日 ${dt}，` + (ns>0?`已取得 ${ns} 檔發行股數，依市值排序）`:`沒有發行股數，排序退回當日成交金額）`);
+}
+THEMES["題材：PCB設備"] = ["3167","2467","6664","6438","3563","3455"];
+const NAME_FB = {"3167":"大量","2467":"志聖","6664":"群翊","6438":"迅得","3563":"牧德","3455":"由田"};  // 名單載入失敗時的備用名稱
+const BATCH = 12;
+const ROLE = i => i===0?"龍頭":i<3?"第二梯隊":i<6?"第三梯隊":"後段班";
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2,"0");
+const num = s => parseFloat(String(s).replace(/,/g,""));
+const pick = (o,...ks) => { for(const k of ks) if(o[k]!==undefined && o[k]!=="") return o[k]; };
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+const STOCKS = {};      // code -> {name, ind, mkt:'L'|'O'|'?', cap, price}
+const GROUP_LIST = {};  // group -> [codes]
+
+async function getJson(u){ const r=await fetch(u); if(!r.ok) throw new Error(r.status); return r.json(); }
+
+async function loadUniverse(){
+  const [l,o,lp,op] = await Promise.allSettled([
+    getJson("https://openapi.twse.com.tw/v1/opendata/t187ap03_L"),
+    getJson("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"),
+    getJson("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"),
+    getJson("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes")
+  ]);
+  const add = (res,mkt) => { if(res.status!=="fulfilled") return;
+    res.value.forEach(r=>{
+      const code=String(pick(r,"公司代號","SecuritiesCompanyCode","Code")||"").trim();
+      if(!/^\d{4}$/.test(code)) return;
+      STOCKS[code]={name:pick(r,"公司簡稱","CompanyAbbreviation","CompanyName")||code,
+        ind:String(pick(r,"產業別","SecuritiesIndustryCode")||"").padStart(2,"0"),
+        mkt, cap:num(pick(r,"實收資本額","Paidin.Capital.NTDollars")||0)};
+    }); };
+  add(l,"L"); add(o,"O");
+  const px = (res,ck,pk) => { if(res.status!=="fulfilled") return;
+    res.value.forEach(r=>{ const c=pick(r,ck,"SecuritiesCompanyCode"); const p=num(pick(r,pk,"Close")); if(STOCKS[c]&&p>0) STOCKS[c].price=p; }); };
+  px(lp,"Code","ClosingPrice"); px(op,"SecuritiesCompanyCode","Close");
+  const cnt = m => Object.values(STOCKS).filter(s=>s.mkt===m).length;
+  const st = (r,n) => r.status==="fulfilled" ? n+" 檔" : "失敗（"+(r.reason&&r.reason.message||r.reason)+"）";
+  SRC = `上市清單 ${st(l,cnt("L"))}、上櫃清單 ${st(o,cnt("O"))}、上市股價 ${st(lp,Object.values(STOCKS).filter(s=>s.mkt==="L"&&s.price).length)}、上櫃股價 ${st(op,Object.values(STOCKS).filter(s=>s.mkt==="O"&&s.price).length)}`;
+  return Object.keys(STOCKS).length>0;
+}
+
+function buildGroups(){
+  const mcap = c => { const s=STOCKS[c];
+    if(s.shares&&s.price) return s.price*s.shares;
+    if(s.cap&&s.price) return s.price*s.cap/10;
+    return s.turn||0; };
+  const byInd = {};
+  Object.keys(STOCKS).forEach(c=>{ const k=STOCKS[c].ind, n=IND_NAME[k]||(/^\d+$/.test(k)?null:k); if(n) (byInd["產業："+n]=byInd["產業："+n]||[]).push(c); });
+  Object.entries(byInd).forEach(([g,list])=>{ GROUP_LIST[g]=list.sort((a,b)=>mcap(b)-mcap(a)); });
+  Object.entries(THEMES).forEach(([g,list])=>{
+    list.forEach(c=>{ if(!STOCKS[c]&&NAME_FB[c]) STOCKS[c]={name:NAME_FB[c],ind:"",mkt:"?",cap:0}; });
+    const known=list.filter(c=>STOCKS[c]);
+    const allHave=known.every(c=>STOCKS[c].turn||(STOCKS[c].price&&(STOCKS[c].cap||STOCKS[c].shares)));
+    GROUP_LIST[g]= allHave ? known.sort((a,b)=>mcap(b)-mcap(a)) : known;  // 資料齊全時依市值排大哥二哥
+  });
+}
+
+function fillSearch(){
+  $("dl").innerHTML = Object.entries(STOCKS).map(([c,s])=>`<option value="${c}">${s.name}</option>`).join("");
+}
+
+// ---- K 線資料 ----
+const cache = {};
+const rocIso = s => { const [y,m,d]=s.split("/"); return `${+y+1911}-${m}-${d}`; };
+const mapRow = (t,a) => ({t:rocIso(t),o:num(a[3]),h:num(a[4]),l:num(a[5]),c:num(a[6]),v:num(a[1])||0});
+async function fetchTwse(code,y,m){
+  const j=await getJson(`https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=${y}${pad(m)}01&stockNo=${code}&response=json`);
+  if(!j.data && j.stat) throw new Error("證交所回應：" + j.stat);
+  return (j.data||[]).map(a=>mapRow(a[0],a));
+}
+const ERR = {};
+async function fetchFinmind(code){
+  const d=new Date(); d.setMonth(d.getMonth()-7);
+  const s=d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
+  const j=await getJson(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${code}&start_date=${s}`);
+  if(!j.data) throw new Error("FinMind："+(j.msg||"無資料"));
+  return j.data.filter(r=>r.close>0).map(r=>({t:r.date,o:r.open,h:r.max,l:r.min,c:r.close,v:r.Trading_Volume||0}));
+}
+async function fetchTpex(code,y,m){
+  const j=await getJson(`https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${code}&date=${y}/${pad(m)}/01&response=json`);
+  const rows=(j.tables&&j.tables[0]&&j.tables[0].data)||[];
+  return rows.map(a=>mapRow(a[0],a));
+}
+async function load(code){
+  if(cache[code]) return cache[code];
+  const d=new Date(), ms=[];
+  for(let i=6;i>=0;i--){ const x=new Date(d.getFullYear(),d.getMonth()-i,1); ms.push([x.getFullYear(),x.getMonth()+1]); }
+  let rows=[];
+  if(STOCKS[code].mkt!=="O"){   // 上市：先探測最新月份，有資料才抓完整四個月
+    const last=ms[ms.length-1];
+    let probe=[]; try{ probe=await fetchTwse(code,last[0],last[1]); }catch(e){ ERR[code]=String(e.message||e); }
+    await sleep(250);
+    if(probe.length){ rows=[...probe];
+      for(const [y,m] of ms.slice(0,-1)){ try{ rows.push(...await fetchTwse(code,y,m)); }catch(e){ ERR[code]=String(e.message||e); } await sleep(250); } }
+  }
+  if(!rows.length){   // 上櫃或上市抓不到：改用 FinMind（上市櫃皆有，一次請求）
+    try{ rows=await fetchFinmind(code); if(rows.length) delete ERR[code]; }catch(e){ ERR[code]=String(e.message||e); }
+  }
+  const cut=new Date(); cut.setMonth(cut.getMonth()-6);
+  rows=rows.filter(r=>!isNaN(r.c)).sort((a,b)=>a.t<b.t?-1:1);
+  for(let i=19;i<rows.length;i++){   // MA20 與布林通道（20 日、±2 個標準差）
+    const w=rows.slice(i-19,i+1).map(r=>r.c), ma=w.reduce((a,b)=>a+b,0)/20;
+    const sd=Math.sqrt(w.reduce((a,b)=>a+(b-ma)**2,0)/20);
+    rows[i].ma=ma; rows[i].up=ma+2*sd; rows[i].dn=ma-2*sd; }
+  rows=rows.filter(r=>new Date(r.t)>=cut);
+  return cache[code]=rows;
+}
+
+function candleSvg(rows,code){
+  if(!rows.length) return `<div class="msg">抓不到資料<br>原因：${ERR[code]||"回傳為空（該代號可能無交易資料）"}</div>`;
+  const W=420,H=320,P={l:44,r:8,t:18,b:22}, VH=56;   // VH：成交量區高度
+  const pb=H-P.b-VH-8;                                  // 價格區底部
+  const hi=Math.max(...rows.map(r=>Math.max(r.h,r.up||0))), lo=Math.min(...rows.map(r=>Math.min(r.l,r.dn||1e12)));
+  const y=v=>P.t+(hi-v)/(hi-lo||1)*(pb-P.t);
+  const maxV=Math.max(...rows.map(r=>r.v||0),1), vy=v=>H-P.b-(v/maxV)*VH;
+  const step=(W-P.l-P.r)/rows.length, bw=Math.max(2,step*.6), cx=i=>P.l+step*i+step/2;
+  let s=`<svg viewBox="0 0 ${W} ${H}">`;
+  for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, yy=y(v);
+    s+=`<line x1="${P.l}" x2="${W-P.r}" y1="${yy}" y2="${yy}" stroke="#eee"/><text x="${P.l-4}" y="${yy+4}" font-size="10" text-anchor="end" fill="#777">${v.toFixed(1)}</text>`; }
+  let ml="";   // 月份刻線
+  rows.forEach((r,i)=>{ const mo=r.t.slice(0,7);
+    if(i===0||mo!==rows[i-1].t.slice(0,7)){
+      const x=P.l+step*i, mm=+mo.slice(5), label=(i===0||mm===1)?mo:mm+"月";
+      if(i>0) s+=`<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H-P.b}" stroke="#bbb" stroke-dasharray="3,3"/>`;
+      ml+=`<text x="${x+3}" y="${H-6}" font-size="10" fill="#555">${label}</text>`; } });
+  // 布林通道：淡藍色帶狀區 + 上下軌線，MA20 橘線
+  const bb=rows.map((r,i)=>r.up?{i,r}:null).filter(Boolean);
+  if(bb.length>1){
+    const top=bb.map(({i,r})=>`${cx(i)},${y(r.up)}`), bot=bb.slice().reverse().map(({i,r})=>`${cx(i)},${y(r.dn)}`);
+    s+=`<polygon points="${top.concat(bot).join(" ")}" fill="#2f6fed" fill-opacity=".07"/>`;
+    s+=`<polyline points="${top.join(" ")}" fill="none" stroke="#2f6fed" stroke-width="1"/>`;
+    s+=`<polyline points="${bb.map(({i,r})=>`${cx(i)},${y(r.dn)}`).join(" ")}" fill="none" stroke="#2f6fed" stroke-width="1"/>`;
+    s+=`<polyline points="${bb.map(({i,r})=>`${cx(i)},${y(r.ma)}`).join(" ")}" fill="none" stroke="#f39c12" stroke-width="1.4"/>`; }
+  rows.forEach((r,i)=>{ const x=cx(i), col=r.c>=r.o?"#e53935":"#2e9e4f", tip=`${r.t} 開${r.o} 高${r.h} 低${r.l} 收${r.c} 量${Math.round((r.v||0)/1000).toLocaleString()}張`;
+    s+=`<line x1="${x}" x2="${x}" y1="${y(r.h)}" y2="${y(r.l)}" stroke="${col}"/><rect x="${x-bw/2}" y="${Math.min(y(r.o),y(r.c))}" width="${bw}" height="${Math.max(1,Math.abs(y(r.o)-y(r.c)))}" fill="${col}"><title>${tip}</title></rect>`;
+    if(r.v) s+=`<rect x="${x-bw/2}" y="${vy(r.v)}" width="${bw}" height="${H-P.b-vy(r.v)}" fill="${col}" fill-opacity=".55"><title>${tip}</title></rect>`; });
+  s+=`<text x="${P.l-4}" y="${vy(maxV)+8}" font-size="9" text-anchor="end" fill="#777">${Math.round(maxV/1000).toLocaleString()}張</text>`;
+  s+=`<text x="${P.l}" y="11" font-size="10" fill="#f39c12">━ MA20</text><text x="${P.l+58}" y="11" font-size="10" fill="#2f6fed">━ 布林通道(20,2)</text><text x="${P.l+158}" y="11" font-size="10" fill="#777">下方：成交量</text>`;
+  return s+ml+`</svg>`;
+}
+
+// ---- 畫面 ----
+let cur={group:null,shown:BATCH,pin:null,tags:[],token:0};
+async function render(){
+  const token=++cur.token, list=GROUP_LIST[cur.group]||[];
+  let items=list.slice(0,cur.shown);
+  if(cur.pin && list.includes(cur.pin) && !items.includes(cur.pin)) items.push(cur.pin);
+  $("tags").innerHTML=cur.tags.map(g=>`<span class="tag ${g===cur.group?"on":""}" data-g="${g}">${g}</span>`).join("");
+  $("status").textContent=`${cur.group}：共 ${list.length} 檔，顯示 ${items.length} 檔（依領頭羊順序）`;
+  $("more").style.display=list.length>cur.shown?"inline-block":"none";
+  $("more").textContent=`再載入 ${Math.min(BATCH,list.length-cur.shown)} 檔`;
+  $("grid").innerHTML=items.map(c=>{ const i=list.indexOf(c);
+    return `<div class="card ${c===cur.pin?"pin":""}"><h3>${c} ${STOCKS[c].name}<span class="role">#${i+1} ${ROLE(i)}</span></h3><div id="c${c}" class="msg" style="color:#888">載入中…</div></div>`; }).join("");
+  for(const c of items){ const rows=await load(c); if(token!==cur.token) return; const el=$("c"+c); if(el){ el.className=""; el.innerHTML=candleSvg(rows,c); } }
+}
+function search(){
+  const q=$("q").value.trim(); if(!q) return;
+  let code=Object.keys(STOCKS).find(c=>c===q)||Object.keys(STOCKS).find(c=>STOCKS[c].name===q)||Object.keys(STOCKS).find(c=>STOCKS[c].name.includes(q));
+  if(!code && /^\d{4}$/.test(q)){ code=q; STOCKS[code]={name:code,ind:"",mkt:"?",cap:0}; }  // 名單外的代號：直接嘗試抓 K 線
+  if(!code){ $("status").textContent="查無此股票。"; return; }
+  let tags=Object.keys(GROUP_LIST).filter(g=>GROUP_LIST[g].includes(code));
+  if(!tags.length){ const g="單檔："+code; GROUP_LIST[g]=[code]; tags=[g]; }
+  // 題材族群優先，其次官方產業
+  tags.sort((a,b)=>(b.startsWith("題材")?1:0)-(a.startsWith("題材")?1:0));
+  cur={group:tags[0],shown:BATCH,pin:code,tags,token:cur.token};
+  render();
+}
+$("go").onclick=search;
+$("q").addEventListener("keydown",e=>{ if(e.key==="Enter") search(); });
+$("tags").addEventListener("click",e=>{ const g=e.target.dataset.g; if(g){ cur.group=g; cur.shown=BATCH; render(); } });
+$("more").onclick=()=>{ cur.shown+=BATCH; render(); };
+
+(async()=>{
+  await loadUniverse().catch(e=>{ SRC="openapi 來源全部失敗（"+(e&&e.message||e)+"）"; });
+  if(!Object.values(STOCKS).some(s=>s.mkt==="L")) await loadListedFallback().catch(e=>{ SRC+="；備援錯誤："+(e&&e.message||e); });
+  buildGroups(); fillSearch();
+  const noL = !Object.values(STOCKS).some(s=>s.mkt==="L");
+  $("src").textContent=`已載入 ${Object.keys(STOCKS).length} 檔股票。${SRC}` + (noL?" ⚠ 上市清單沒載入成功，上市個股將找不到官方產業同業。":"");
+  $("status").textContent="名單已就緒，請輸入代號或名稱查詢。";
+  $("q").disabled=false; $("go").disabled=false; $("q").placeholder="代號或名稱，例如 2330 / 台積電"; $("q").focus();
+})();
+</script>
+</body>
+</html>
