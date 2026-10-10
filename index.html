@@ -205,16 +205,15 @@ async function load(code){
   const d=new Date(), ms=[];
   for(let i=6;i>=0;i--){ const x=new Date(d.getFullYear(),d.getMonth()-i,1); ms.push([x.getFullYear(),x.getMonth()+1]); }
   let rows=[];
-  if(STOCKS[code].mkt!=="O"){   // 上市：先探測最新月份，有資料才抓完整四個月
-    const last=ms[ms.length-1];
-    let probe=[]; try{ probe=await fetchTwse(code,last[0],last[1]); }catch(e){ ERR[code]=String(e.message||e); }
-    await sleep(250);
-    if(probe.length){ rows=[...probe];
-      for(const [y,m] of ms.slice(0,-1)){ try{ rows.push(...await fetchTwse(code,y,m)); }catch(e){ ERR[code]=String(e.message||e); } await sleep(250); } }
+  // 主要來源：FinMind（上市櫃皆有，一次請求就拿到完整區間，不會被逐月限流打斷）
+  try{ rows=await fetchFinmind(code); }catch(e){ ERR[code]=String(e.message||e); }
+  // 資料太少（< 約五個月）時，上市股票改用證交所逐月補抓，取筆數較多者
+  if(rows.length<100 && STOCKS[code].mkt!=="O"){
+    let alt=[];
+    for(const [y,m] of ms){ try{ alt.push(...await fetchTwse(code,y,m)); }catch(e){ ERR[code]=ERR[code]||String(e.message||e); } await sleep(300); }
+    if(alt.length>rows.length) rows=alt;
   }
-  if(!rows.length){   // 上櫃或上市抓不到：改用 FinMind（上市櫃皆有，一次請求）
-    try{ rows=await fetchFinmind(code); if(rows.length) delete ERR[code]; }catch(e){ ERR[code]=String(e.message||e); }
-  }
+  if(rows.length>=100) delete ERR[code];
   const cut=new Date(); cut.setMonth(cut.getMonth()-6);
   rows=rows.filter(r=>!isNaN(r.c)).sort((a,b)=>a.t<b.t?-1:1);
   for(let i=19;i<rows.length;i++){   // MA20 與布林通道（20 日、±2 個標準差）
@@ -237,11 +236,12 @@ function candleSvg(rows,code){
   for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, yy=y(v);
     s+=`<line x1="${P.l}" x2="${W-P.r}" y1="${yy}" y2="${yy}" stroke="#eee"/><text x="${P.l-4}" y="${yy+4}" font-size="10" text-anchor="end" fill="#777">${v.toFixed(1)}</text>`; }
   let ml="";   // 月份刻線
-  rows.forEach((r,i)=>{ const mo=r.t.slice(0,7);
-    if(i===0||mo!==rows[i-1].t.slice(0,7)){
-      const x=P.l+step*i, mm=+mo.slice(5), label=(i===0||mm===1)?mo:mm+"月";
-      if(i>0) s+=`<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H-P.b}" stroke="#bbb" stroke-dasharray="3,3"/>`;
-      ml+=`<text x="${x+3}" y="${H-6}" font-size="10" fill="#555">${label}</text>`; } });
+  const starts=[]; rows.forEach((r,i)=>{ if(i===0||r.t.slice(0,7)!==rows[i-1].t.slice(0,7)) starts.push(i); });
+  starts.forEach((i,k)=>{
+    const mo=rows[i].t.slice(0,7), x=P.l+step*i, mm=+mo.slice(5), label=(k===0||mm===1)?mo:mm+"月";
+    const nx=starts[k+1]!==undefined?P.l+step*starts[k+1]:W-P.r;
+    if(i>0) s+=`<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H-P.b}" stroke="#bbb" stroke-dasharray="3,3"/>`;
+    if(nx-x>=(label.length>3?46:24)) ml+=`<text x="${x+3}" y="${H-6}" font-size="10" fill="#555">${label}</text>`; });
   // 布林通道：淡藍色帶狀區 + 上下軌線，MA20 橘線
   const bb=rows.map((r,i)=>r.up?{i,r}:null).filter(Boolean);
   if(bb.length>1){
