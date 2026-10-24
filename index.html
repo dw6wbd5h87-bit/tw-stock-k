@@ -28,6 +28,14 @@ svg{width:100%;height:auto;display:block}
 #tbl td.l,#tbl th.l{text-align:left}
 #tbl tr.base td{background:#fff8e1;font-weight:600}
 .up{color:#e53935}.dn{color:#2e9e4f}
+#lim{overflow-x:auto;margin-top:10px}
+#lim table{border-collapse:collapse;background:#fff;font-size:14px;min-width:560px}
+#lim th,#lim td{border:1px solid #e3e3e3;padding:6px 10px;text-align:right;white-space:nowrap}
+#lim th{background:#f0f1f4;cursor:pointer;user-select:none}
+#lim td.l,#lim th.l{text-align:left}
+#lim tr.base td{background:#fff8e1;font-weight:600}
+#lim .sum{margin:8px 0;font-size:13px;color:#444;white-space:normal}
+#lim tbody tr[data-c],#lim tr[data-c]{cursor:pointer}
 </style>
 </head>
 <body>
@@ -36,6 +44,7 @@ svg{width:100%;height:auto;display:block}
   <input id="q" placeholder="名單載入中，請稍候…" list="dl" disabled>
   <datalist id="dl"></datalist>
   <button id="go" disabled>查詢</button>
+  <button id="scan" disabled>找出獨強漲停股</button>
 </div>
 <div id="tags"></div>
 <div id="assign" class="bar" style="display:none;margin-top:8px">
@@ -50,6 +59,7 @@ svg{width:100%;height:auto;display:block}
 </div>
 <div id="src" class="note">載入全市場股票清單中…</div>
 <div id="status" class="note"></div>
+<div id="lim"></div>
 <div id="tbl"></div>
 <div id="grid"></div>
 <button id="more">載入更多</button>
@@ -283,6 +293,61 @@ function candleSvg(rows,code){
 }
 
 // ---- 畫面 ----
+// ---- 獨強漲停掃描 ----
+const tickOf=p=>p<10?0.01:p<50?0.05:p<100?0.1:p<500?0.5:p<1000?1:5;
+const limitUpOf=prev=>{ const raw=prev*1.1, t=tickOf(raw); return Math.floor(raw/t+1e-9)*t; };   // 前收 ×1.1，依升降單位無條件捨去
+let FM_BAD="";
+async function fetchDayAll(){   // 取得最近一個交易日的全市場收盤與前收
+  for(let i=0;i<7;i++){
+    const d=new Date(); d.setDate(d.getDate()-i);
+    const iso=d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()), ymd=iso.replace(/-/g,"");
+    if(!FM_BAD){   // 1) FinMind：單次請求含上市＋上櫃
+      try{ const j=await getJson(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&start_date=${iso}&end_date=${iso}`);
+        if(j.data&&j.data.length>500){ const m={};
+          j.data.forEach(r=>{ const c=Number(r.close), sp=Number(r.spread); if(c>0&&!isNaN(sp)) m[String(r.stock_id)]={c,prev:c-sp}; });
+          return {date:iso,map:m,src:"FinMind（上市＋上櫃）"}; }
+        if(j.data&&j.data.length===0){ await sleep(300); continue; }   // 非交易日
+        FM_BAD=j.msg||"回傳資料不完整";
+      }catch(e){ FM_BAD=String(e.message||e); }
+    }
+    try{   // 2) 證交所：僅上市
+      const j=await getJson(`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=${ymd}&type=ALLBUT0999&response=json`);
+      const t=(j.tables||[]).find(t=>t.fields&&t.fields.includes("證券代號")&&t.fields.includes("收盤價")&&t.fields.includes("漲跌價差"));
+      if(t&&t.data&&t.data.length>300){
+        const f=n=>t.fields.indexOf(n), id=t.fields.findIndex(x=>x.startsWith("漲跌(")), m={};
+        t.data.forEach(r=>{ const c=num(r[f("收盤價")]), df=num(r[f("漲跌價差")]);
+          if(!(c>0)||isNaN(df)) return; const sg=/\+/.test(String(r[id]))?1:/-/.test(String(r[id]))?-1:0;
+          m[String(r[f("證券代號")]).trim()]={c,prev:c-sg*df}; });
+        return {date:iso,map:m,src:"證交所（僅上市，上櫃無資料）"}; }
+    }catch(e){}
+    await sleep(300);
+  }
+  return null;
+}
+async function runScan(){
+  $("scan").disabled=true; $("status").textContent="抓取最近交易日全市場收盤行情…";
+  try{
+    const day=await fetchDayAll();
+    if(!day){ $("lim").innerHTML=""; $("status").textContent="抓不到全市場行情（"+(FM_BAD||"證交所也沒有資料")+"）。"; return; }
+    const pct={}, lim={};
+    Object.entries(day.map).forEach(([c,o])=>{ if(o.prev>0){ pct[c]=(o.c/o.prev-1)*100; lim[c]=o.c>o.prev&&o.c>=limitUpOf(o.prev)-1e-6; } });
+    const loners=[]; let multi=0;
+    Object.keys(GROUP_LIST).filter(g=>g.startsWith("細產業：")).forEach(g=>{
+      const mem=GROUP_LIST[g], ups=mem.filter(c=>lim[c]), scanned=mem.filter(c=>pct[c]!==undefined);
+      if(ups.length>1) multi+=ups.length;
+      if(ups.length===1){ const c=ups[0], others=scanned.filter(x=>x!==c).map(x=>pct[x]);
+        loners.push({c,g:g.slice(4),total:mem.length,scanned:scanned.length,close:day.map[c].c,p:pct[c],second:others.length?Math.max(...others):null}); } });
+    loners.sort((a,b)=>(a.second===null)-(b.second===null)||a.second-b.second);
+    const noSub=XL_ROWS.filter(r=>r[2]<0&&lim[r[0]]).length, partial=day.src.includes("僅上市");
+    const f=x=>x===null?"—":`<span class="${x>0?"up":x<0?"dn":""}">${x>0?"+":""}${x.toFixed(2)}%</span>`;
+    $("lim").innerHTML=`<div class="sum"><b>資料日 ${day.date}</b>（來源：${day.src}）｜獨自漲停 <b>${loners.length}</b> 檔｜同族群有多檔一起漲停的漲停股 ${multi} 檔｜未分類的漲停股 ${noSub} 檔｜漲停以「收盤價 ＝ 前收 ×110% 依升降單位捨去」判定，點列可查看該股與同族群。`
+      +(partial?`<br>⚠ 目前只取得上市股票資料，上櫃股票沒有納入，標 ⚠ 的列代表該族群有成員未納入判斷，不一定真的「獨強」。`:"")+`</div>`
+      +(loners.length?`<table><tr><th class="l">代號</th><th class="l">名稱</th><th class="l">細產業</th><th>收盤</th><th>漲幅</th><th>族群檔數</th><th>已納入判斷</th><th>同族群其餘最強漲幅</th></tr>`
+      +loners.map(o=>`<tr data-c="${o.c}"><td class="l">${o.c}</td><td class="l">${STOCKS[o.c].name}</td><td class="l">${o.g}</td><td>${o.close}</td><td>${f(o.p)}</td><td>${o.total}</td><td>${o.scanned<o.total?"⚠ ":""}${o.scanned}</td><td>${f(o.second)}</td></tr>`).join("")+`</table>`:`<div class="sum">今天沒有符合條件的獨強漲停股。</div>`);
+    $("status").textContent=`掃描完成：${loners.length} 檔獨自漲停。`;
+  }catch(e){ $("status").textContent="掃描失敗："+(e.message||e); }
+  $("scan").disabled=false;
+}
 const CHG={};   // 代號 -> {t:日期, c:收盤, p:最近一日漲跌幅%}
 const TBL={key:"r",dir:-1};
 const lastChg=rows=>{ const n=rows.length; return n>1&&rows[n-2].c>0 ? {t:rows[n-1].t,c:rows[n-1].c,p:(rows[n-1].c/rows[n-2].c-1)*100} : null; };
@@ -370,6 +435,9 @@ function search(){
 }
 $("go").onclick=search;
 $("corr").onclick=runCorr;
+$("scan").onclick=runScan;
+$("lim").addEventListener("click",e=>{ const tr=e.target.closest&&e.target.closest("tr"); const c=tr&&tr.dataset.c; if(!c) return;
+  $("q").value=c; search(); if($("tags").scrollIntoView) $("tags").scrollIntoView({behavior:"smooth"}); });
 $("asgSel").innerHTML=XL_SUBS.map(x=>`<option>${x}</option>`).join("");
 $("asgBtn").onclick=()=>{
   const c=cur.pin; if(!c) return;
@@ -394,7 +462,7 @@ $("more").onclick=()=>{ cur.shown+=BATCH; render(); };
   const noL = !Object.values(STOCKS).some(s=>s.mkt==="L");
   $("src").textContent=`已載入 ${Object.keys(STOCKS).length} 檔股票。${SRC}` + (noL?" ⚠ 上市清單沒載入成功，上市個股的 K 線改走 FinMind，市值排序可能不完整。":"");
   $("status").textContent="名單已就緒，請輸入代號或名稱查詢。";
-  $("q").disabled=false; $("go").disabled=false; $("q").placeholder="代號或名稱，例如 2330 / 台積電"; $("q").focus();
+  $("q").disabled=false; $("go").disabled=false; $("scan").disabled=false; $("q").placeholder="代號或名稱，例如 2330 / 台積電"; $("q").focus();
 })();
 </script>
 </body>
