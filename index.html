@@ -21,6 +21,13 @@ svg{width:100%;height:auto;display:block}
 .msg{color:#a33;font-size:13px;padding:30px 0;text-align:center}
 .note{font-size:12px;color:#666;margin-top:8px}
 #more{margin:14px 0;display:none}
+#tbl{overflow-x:auto;margin-top:10px}
+#tbl table{border-collapse:collapse;background:#fff;font-size:14px;min-width:560px}
+#tbl th,#tbl td{border:1px solid #e3e3e3;padding:6px 10px;text-align:right;white-space:nowrap}
+#tbl th{background:#f0f1f4;cursor:pointer;user-select:none}
+#tbl td.l,#tbl th.l{text-align:left}
+#tbl tr.base td{background:#fff8e1;font-weight:600}
+.up{color:#e53935}.dn{color:#2e9e4f}
 </style>
 </head>
 <body>
@@ -31,8 +38,13 @@ svg{width:100%;height:auto;display:block}
   <button id="go" disabled>查詢</button>
 </div>
 <div id="tags"></div>
+<div id="corrbar" class="bar" style="display:none;margin-top:8px">
+  <select id="scope" style="padding:7px;border:1px solid #bbb;border-radius:6px"><option value="narrow">比較範圍：同細產業＋題材</option><option value="wide">擴大到同大類（最多 80 檔，較慢）</option></select>
+  <button id="corr">計算高連動個股（近六個月日報酬相關係數）</button>
+</div>
 <div id="src" class="note">載入全市場股票清單中…</div>
 <div id="status" class="note"></div>
+<div id="tbl"></div>
 <div id="grid"></div>
 <button id="more">載入更多</button>
 <p class="note">全市場名單來自證交所／櫃買中心公開資料。「細產業」族群依你提供的 Excel 分類，並以市值由大到小排序，視為領頭羊順序（取不到市值的股票標示「市值未知」並排在最後）；「題材」族群為人工排列，可編輯下方 THEMES。不構成投資建議。</p>
@@ -200,7 +212,7 @@ async function fetchTpex(code,y,m){
   const rows=(j.tables&&j.tables[0]&&j.tables[0].data)||[];
   return rows.map(a=>mapRow(a[0],a));
 }
-async function load(code){
+async function load(code,fast){
   if(cache[code]) return cache[code];
   const d=new Date(), ms=[];
   for(let i=6;i>=0;i--){ const x=new Date(d.getFullYear(),d.getMonth()-i,1); ms.push([x.getFullYear(),x.getMonth()+1]); }
@@ -208,7 +220,7 @@ async function load(code){
   // 主要來源：FinMind（上市櫃皆有，一次請求就拿到完整區間，不會被逐月限流打斷）
   try{ rows=await fetchFinmind(code); }catch(e){ ERR[code]=String(e.message||e); }
   // 資料太少（< 約五個月）時，上市股票改用證交所逐月補抓，取筆數較多者
-  if(rows.length<100 && STOCKS[code].mkt!=="O"){
+  if(!fast && rows.length<100 && STOCKS[code].mkt!=="O"){
     let alt=[];
     for(const [y,m] of ms){ try{ alt.push(...await fetchTwse(code,y,m)); }catch(e){ ERR[code]=ERR[code]||String(e.message||e); } await sleep(300); }
     if(alt.length>rows.length) rows=alt;
@@ -221,6 +233,7 @@ async function load(code){
     const sd=Math.sqrt(w.reduce((a,b)=>a+(b-ma)**2,0)/20);
     rows[i].ma=ma; rows[i].up=ma+2*sd; rows[i].dn=ma-2*sd; }
   rows=rows.filter(r=>new Date(r.t)>=cut);
+  if(fast&&rows.length<100) return rows;
   return cache[code]=rows;
 }
 
@@ -259,17 +272,72 @@ function candleSvg(rows,code){
 }
 
 // ---- 畫面 ----
+const CHG={};   // 代號 -> {t:日期, c:收盤, p:最近一日漲跌幅%}
+const TBL={key:"r",dir:-1};
+const lastChg=rows=>{ const n=rows.length; return n>1&&rows[n-2].c>0 ? {t:rows[n-1].t,c:rows[n-1].c,p:(rows[n-1].c/rows[n-2].c-1)*100} : null; };
+function tableHtml(g){
+  const cm=CORRMAP[g]; if(!cm) return "";
+  const rows=GROUP_LIST[g].filter(c=>c!==cur.pin).map(c=>({c,r:cm[c],p:CHG[c]?CHG[c].p:null}));
+  rows.sort((a,b)=>{ const x=a[TBL.key], y=b[TBL.key]; if(x===null||x===undefined) return 1; if(y===null||y===undefined) return -1; return (x-y)*TBL.dir; });
+  const fmtP=p=>p===null?"—":`<span class="${p>0?"up":p<0?"dn":""}">${p>0?"+":""}${p.toFixed(2)}%</span>`;
+  const line=(c,r,base)=>`<tr class="${base?"base":""}"><td class="l">${c}</td><td class="l">${STOCKS[c].name}</td><td class="l">${STOCKS[c].sub||""}</td><td>${base?"基準":r.toFixed(2)}</td><td>${CHG[c]?CHG[c].c:"—"}</td><td>${fmtP(CHG[c]?CHG[c].p:null)}</td><td>${CHG[c]?CHG[c].t:"—"}</td></tr>`;
+  const arrow=k=>TBL.key===k?(TBL.dir<0?" ▼":" ▲"):"";
+  return `<table><tr><th class="l">代號</th><th class="l">名稱</th><th class="l">細產業</th><th data-k="r">相關係數${arrow("r")}</th><th>最近收盤</th><th data-k="p">最近一日漲跌幅${arrow("p")}</th><th>資料日期</th></tr>`
+    + line(cur.pin,1,true) + rows.map(o=>line(o.c,o.r,false)).join("") + `</table>`;
+}
+const CORRMAP={};   // 高連動族群名稱 -> {代號: 相關係數}
+function roleText(c,i){ const cm=CORRMAP[cur.group];
+  if(cm) return c===cur.pin?"基準":"相關係數 "+(cm[c]===undefined?"—":cm[c].toFixed(2));
+  return mcapOf(c)>0?`#${i+1} ${ROLE(i)}`:"市值未知"; }
+const catOf=c=>{ const x=STOCKS[c]&&STOCKS[c].sub; return x?x.split("-")[0]:""; };
+async function pmap(items,n,fn){ let i=0; await Promise.all(Array.from({length:n},async()=>{ while(i<items.length){ const k=i++; await fn(items[k],k); } })); }
+const dailyRet=rows=>{ const m={}; for(let i=1;i<rows.length;i++) if(rows[i-1].c>0) m[rows[i].t]=rows[i].c/rows[i-1].c-1; return m; };
+function pearson(a,b){ const xs=[],ys=[]; for(const t in a) if(t in b){ xs.push(a[t]); ys.push(b[t]); }
+  const n=xs.length; if(n<60) return null;
+  const mx=xs.reduce((p,q)=>p+q,0)/n, my=ys.reduce((p,q)=>p+q,0)/n; let sxy=0,sxx=0,syy=0;
+  for(let i=0;i<n;i++){ sxy+=(xs[i]-mx)*(ys[i]-my); sxx+=(xs[i]-mx)**2; syy+=(ys[i]-my)**2; }
+  return sxx&&syy ? sxy/Math.sqrt(sxx*syy) : null; }
+async function runCorr(){
+  const base=cur.pin; if(!base) return;
+  $("corr").disabled=true;
+  try{
+    const wide=$("scope").value==="wide", pool=new Set();
+    Object.keys(GROUP_LIST).forEach(g=>{ if((g.startsWith("細產業")||g.startsWith("題材"))&&GROUP_LIST[g].includes(base)) GROUP_LIST[g].forEach(c=>pool.add(c)); });
+    if(wide){ const cat=catOf(base); if(cat) Object.keys(STOCKS).filter(c=>catOf(c)===cat).forEach(c=>pool.add(c)); }
+    pool.delete(base);
+    const list=[...pool].sort((a,b)=>mcapOf(b)-mcapOf(a)).slice(0,wide?80:60);
+    $("status").textContent=`讀取 ${STOCKS[base].name} 股價中…`;
+    const baseRows=await load(base);
+    if(baseRows.length<60){ $("status").textContent=`${base} 的股價資料不足，無法計算（${ERR[base]||"筆數太少"}）`; return; }
+    const rb=dailyRet(baseRows), res={}; let done=0, fail=0;
+    CHG[base]=lastChg(baseRows);
+    await pmap(list,4,async c=>{
+      let r=[]; try{ r=await load(c,true); }catch(e){}
+      if(r.length) CHG[c]=lastChg(r);
+      done++; $("status").textContent=`計算相關係數中… ${done}/${list.length}`;
+      const x=r.length>=60?pearson(rb,dailyRet(r)):null;
+      if(x===null||isNaN(x)) fail++; else res[c]=x; });
+    const ranked=Object.keys(res).sort((a,b)=>res[b]-res[a]);
+    const g=`高連動：${base} ${STOCKS[base].name}`;
+    GROUP_LIST[g]=[base,...ranked]; CORRMAP[g]=res;
+    if(!cur.tags.includes(g)) cur.tags.push(g);
+    cur.group=g; cur.shown=BATCH; await render();
+    $("status").textContent+=`；比較 ${list.length} 檔，${fail} 檔資料不足未列入。相關係數越接近 1 代表近六個月日漲跌越同步。`;
+  }catch(e){ $("status").textContent="計算失敗："+(e.message||e); }
+  $("corr").disabled=false;
+}
 let cur={group:null,shown:BATCH,pin:null,tags:[],token:0};
 async function render(){
+  $("tbl").innerHTML=tableHtml(cur.group);
   const token=++cur.token, list=GROUP_LIST[cur.group]||[];
   let items=list.slice(0,cur.shown);
   if(cur.pin && list.includes(cur.pin) && !items.includes(cur.pin)) items.push(cur.pin);
   $("tags").innerHTML=cur.tags.map(g=>`<span class="tag ${g===cur.group?"on":""}" data-g="${g}">${g}</span>`).join("");
-  { const unk=list.filter(c=>!mcapOf(c)).length; $("status").textContent=`${cur.group}：共 ${list.length} 檔，顯示 ${items.length} 檔（依市值由大到小）` + (unk?`；其中 ${unk} 檔取不到市值，排在最後`:""); }
+  { const unk=list.filter(c=>!mcapOf(c)).length; $("status").textContent=`${cur.group}：共 ${list.length} 檔，顯示 ${items.length} 檔（${CORRMAP[cur.group]?"依相關係數由高到低":"依市值由大到小"}）` + (unk&&!CORRMAP[cur.group]?`；其中 ${unk} 檔取不到市值，排在最後`:""); }
   $("more").style.display=list.length>cur.shown?"inline-block":"none";
   $("more").textContent=`再載入 ${Math.min(BATCH,list.length-cur.shown)} 檔`;
   $("grid").innerHTML=items.map(c=>{ const i=list.indexOf(c);
-    return `<div class="card ${c===cur.pin?"pin":""}"><h3>${c} ${STOCKS[c].name}<span class="role">${mcapOf(c)>0?`#${i+1} ${ROLE(i)}`:"市值未知"}</span></h3><div id="c${c}" class="msg" style="color:#888">載入中…</div></div>`; }).join("");
+    return `<div class="card ${c===cur.pin?"pin":""}"><h3>${c} ${STOCKS[c].name}<span class="role">${roleText(c,i)}</span></h3><div id="c${c}" class="msg" style="color:#888">載入中…</div></div>`; }).join("");
   for(const c of items){ const rows=await load(c); if(token!==cur.token) return; const el=$("c"+c); if(el){ el.className=""; el.innerHTML=candleSvg(rows,c); } }
 }
 function search(){
@@ -282,9 +350,14 @@ function search(){
   // 題材族群優先，其次細產業
   tags.sort((a,b)=>(b.startsWith("題材")?1:0)-(a.startsWith("題材")?1:0));
   cur={group:tags[0],shown:BATCH,pin:code,tags,token:cur.token};
+  $("corrbar").style.display="flex";
   render();
 }
 $("go").onclick=search;
+$("corr").onclick=runCorr;
+$("tbl").addEventListener("click",e=>{ const k=e.target.dataset.k; if(!k) return;
+  if(TBL.key===k) TBL.dir*=-1; else { TBL.key=k; TBL.dir=-1; }
+  $("tbl").innerHTML=tableHtml(cur.group); });
 $("q").addEventListener("keydown",e=>{ if(e.key==="Enter") search(); });
 $("tags").addEventListener("click",e=>{ const g=e.target.dataset.g; if(g){ cur.group=g; cur.shown=BATCH; render(); } });
 $("more").onclick=()=>{ cur.shown+=BATCH; render(); };
