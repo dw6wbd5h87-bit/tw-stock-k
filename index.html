@@ -338,12 +338,18 @@ async function runScan(){
       if(ups.length===1){ const c=ups[0], others=scanned.filter(x=>x!==c).map(x=>pct[x]);
         loners.push({c,g:g.slice(4),total:mem.length,scanned:scanned.length,close:day.map[c].c,p:pct[c],second:others.length?Math.max(...others):null}); } });
     loners.sort((a,b)=>(a.second===null)-(b.second===null)||a.second-b.second);
+    let vdone=0;   // 只對獨強個股逐檔讀取成交量（一檔一次請求）
+    await pmap(loners,3,async o=>{
+      let r=[]; try{ r=await load(o.c,true); }catch(e){}
+      const last=r[r.length-1];
+      if(last&&last.t===day.date&&last.v){ const w=r.slice(-5); o.vol=last.v/1000; o.avg5=w.reduce((a,x)=>a+(x.v||0),0)/w.length/1000; }
+      $("status").textContent=`讀取獨強個股成交量… ${++vdone}/${loners.length}`; });
     const noSub=XL_ROWS.filter(r=>r[2]<0&&lim[r[0]]).length, partial=day.src.includes("僅上市");
     const f=x=>x===null?"—":`<span class="${x>0?"up":x<0?"dn":""}">${x>0?"+":""}${x.toFixed(2)}%</span>`;
-    $("lim").innerHTML=`<div class="sum"><b>資料日 ${day.date}</b>（來源：${day.src}）｜獨自漲停 <b>${loners.length}</b> 檔｜同族群有多檔一起漲停的漲停股 ${multi} 檔｜未分類的漲停股 ${noSub} 檔｜漲停以「收盤價 ＝ 前收 ×110% 依升降單位捨去」判定，點列可查看該股與同族群。`
+    $("lim").innerHTML=`<div class="sum"><b>資料日 ${day.date}</b>（來源：${day.src}）｜獨自漲停 <b>${loners.length}</b> 檔｜同族群有多檔一起漲停的漲停股 ${multi} 檔｜未分類的漲停股 ${noSub} 檔｜漲停以「收盤價 ＝ 前收 ×110% 依升降單位捨去」判定，成交量為股票最近一個交易日的成交張數，近5日平均含當日（共 5 個交易日），資料不足顯示「—」；點列可查看該股與同族群。`
       +(partial?`<br>⚠ 目前只取得上市股票資料，上櫃股票沒有納入，標 ⚠ 的列代表該族群有成員未納入判斷，不一定真的「獨強」。`:"")+`</div>`
-      +(loners.length?`<table><tr><th class="l">代號</th><th class="l">名稱</th><th class="l">細產業</th><th>收盤</th><th>漲幅</th><th>族群檔數</th><th>已納入判斷</th><th>同族群其餘最強漲幅</th></tr>`
-      +loners.map(o=>`<tr data-c="${o.c}"><td class="l">${o.c}</td><td class="l">${STOCKS[o.c].name}</td><td class="l">${o.g}</td><td>${o.close}</td><td>${f(o.p)}</td><td>${o.total}</td><td>${o.scanned<o.total?"⚠ ":""}${o.scanned}</td><td>${f(o.second)}</td></tr>`).join("")+`</table>`:`<div class="sum">今天沒有符合條件的獨強漲停股。</div>`);
+      +(loners.length?`<table><tr><th class="l">代號</th><th class="l">名稱</th><th class="l">細產業</th><th>收盤</th><th>漲幅</th><th>最近一日成交量（張）</th><th>近5日平均成交量（張）</th><th>族群檔數</th><th>已納入判斷</th><th>同族群其餘最強漲幅</th></tr>`
+      +loners.map(o=>`<tr data-c="${o.c}"><td class="l">${o.c}</td><td class="l">${STOCKS[o.c].name}</td><td class="l">${o.g}</td><td>${o.close}</td><td>${f(o.p)}</td><td>${o.vol===undefined?"—":Math.round(o.vol).toLocaleString()}</td><td>${o.avg5===undefined?"—":Math.round(o.avg5).toLocaleString()}</td><td>${o.total}</td><td>${o.scanned<o.total?"⚠ ":""}${o.scanned}</td><td>${f(o.second)}</td></tr>`).join("")+`</table>`:`<div class="sum">今天沒有符合條件的獨強漲停股。</div>`);
     $("status").textContent=`掃描完成：${loners.length} 檔獨自漲停。`;
   }catch(e){ $("status").textContent="掃描失敗："+(e.message||e); }
   $("scan").disabled=false;
